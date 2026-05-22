@@ -56,6 +56,7 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USERNAME }}
           key: ${{ secrets.SERVER_SSH_KEY }}
+          password: ${{ secrets.SERVER_PASSWORD }}
           # port: 22 # uncomment if you use a different port
           script: |
             # Login to GitHub Container Registry on the server
