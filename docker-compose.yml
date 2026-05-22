@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: surezense-backend
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # If you use PostgreSQL or other environments, add them here
+    # environment:
+    #   - DATABASE_URL=postgresql://user:password@db:5432/dbname
