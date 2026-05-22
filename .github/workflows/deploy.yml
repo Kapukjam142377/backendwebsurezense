@@ -10,7 +10,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Docker requires repository names to be completely lowercase.
+  IMAGE_NAME: kapukjam142377/backendwebsurezense
 
 jobs:
   build-and-push:
