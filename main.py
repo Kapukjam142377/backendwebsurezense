@@ -2,6 +2,9 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
+from pydantic import BaseModel
+import hashlib
+import secrets
 import models
 import schemas
 from database import engine, get_db
@@ -25,7 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
+@app.get("/", tags=["System Status"])
 def read_root():
     return {
         "status": "online",
@@ -34,7 +37,7 @@ def read_root():
     }
 
 # 1. Create a Full Report (creates patient, report, markers, and genetics in a single transaction)
-@app.post("/api/reports", response_model=schemas.MedicalReport, status_code=status.HTTP_201_CREATED)
+@app.post("/api/reports", response_model=schemas.MedicalReport, status_code=status.HTTP_201_CREATED, tags=["Medical Reports"])
 def create_report(report_in: schemas.MedicalReportCreate, db: Session = Depends(get_db)):
     try:
         # Create Patient
@@ -96,7 +99,7 @@ def create_report(report_in: schemas.MedicalReportCreate, db: Session = Depends(
         )
 
 # 2. Get a Specific Report by ID (returns patient, markers, and genetics data)
-@app.get("/api/reports/{report_id}", response_model=schemas.MedicalReport)
+@app.get("/api/reports/{report_id}", response_model=schemas.MedicalReport, tags=["Medical Reports"])
 def get_report(report_id: int, db: Session = Depends(get_db)):
     db_report = db.query(models.MedicalReport).filter(models.MedicalReport.id == report_id).first()
     if not db_report:
@@ -107,13 +110,13 @@ def get_report(report_id: int, db: Session = Depends(get_db)):
     return db_report
 
 # 3. List All Reports
-@app.get("/api/reports", response_model=List[schemas.MedicalReport])
+@app.get("/api/reports", response_model=List[schemas.MedicalReport], tags=["Medical Reports"])
 def list_reports(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     reports = db.query(models.MedicalReport).offset(skip).limit(limit).all()
     return reports
 
 # 4. Delete a Report (cascades delete to markers and genetics tables)
-@app.delete("/api/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/reports/{report_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Medical Reports"])
 def delete_report(report_id: int, db: Session = Depends(get_db)):
     db_report = db.query(models.MedicalReport).filter(models.MedicalReport.id == report_id).first()
     if not db_report:
@@ -130,7 +133,7 @@ def delete_report(report_id: int, db: Session = Depends(get_db)):
 # ===================================================
 
 # 1. Create Order (Checkout)
-@app.post("/api/orders", response_model=schemas.Order, status_code=status.HTTP_201_CREATED)
+@app.post("/api/orders", response_model=schemas.Order, status_code=status.HTTP_201_CREATED, tags=["eCommerce Orders"])
 def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
     try:
         # Calculate total price of all order items
@@ -172,13 +175,13 @@ def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
         )
 
 # 2. List All Orders
-@app.get("/api/orders", response_model=List[schemas.Order])
+@app.get("/api/orders", response_model=List[schemas.Order], tags=["eCommerce Orders"])
 def list_orders(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     orders = db.query(models.Order).offset(skip).limit(limit).all()
     return orders
 
 # 3. Get Specific Order
-@app.get("/api/orders/{order_id}", response_model=schemas.Order)
+@app.get("/api/orders/{order_id}", response_model=schemas.Order, tags=["eCommerce Orders"])
 def get_order(order_id: int, db: Session = Depends(get_db)):
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not db_order:
@@ -189,7 +192,7 @@ def get_order(order_id: int, db: Session = Depends(get_db)):
     return db_order
 
 # 4. Update Order / Payment Status
-@app.patch("/api/orders/{order_id}/status", response_model=schemas.Order)
+@app.patch("/api/orders/{order_id}/status", response_model=schemas.Order, tags=["eCommerce Orders"])
 def update_order_status(order_id: int, status_update: schemas.OrderStatusUpdate, db: Session = Depends(get_db)):
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not db_order:
@@ -208,7 +211,7 @@ def update_order_status(order_id: int, status_update: schemas.OrderStatusUpdate,
     return db_order
 
 # 5. Delete / Cancel Order
-@app.delete("/api/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+@app.delete("/api/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["eCommerce Orders"])
 def delete_order(order_id: int, db: Session = Depends(get_db)):
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not db_order:
@@ -219,4 +222,275 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
     db.delete(db_order)
     db.commit()
     return None
+
+
+# ===================================================
+#   Password Hashing Helpers
+# ===================================================
+
+def hash_password(password: str) -> str:
+    # Generate a random 16-byte salt
+    salt = secrets.token_hex(16)
+    # Hash using PBKDF2 with SHA-256
+    pwd_hash = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt.encode('utf-8'),
+        100000  # Number of iterations
+    )
+    # Store both salt and hash together, separated by a colon
+    return f"{salt}:{pwd_hash.hex()}"
+
+def verify_password(password: str, hashed_password_str: str) -> bool:
+    try:
+        salt, pwd_hash_hex = hashed_password_str.split(":")
+        pwd_hash = hashlib.pbkdf2_hmac(
+            'sha256',
+            password.encode('utf-8'),
+            salt.encode('utf-8'),
+            100000
+        )
+        return pwd_hash.hex() == pwd_hash_hex
+    except Exception:
+        return False
+
+
+# ===================================================
+#   User Management API Endpoints
+# ===================================================
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+@app.post("/api/users", response_model=schemas.User, status_code=status.HTTP_201_CREATED, tags=["Users"])
+def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
+    # Check if user already exists
+    existing_user = db.query(models.User).filter(models.User.email == user_in.email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    if user_in.username:
+        existing_username = db.query(models.User).filter(models.User.username == user_in.username).first()
+        if existing_username:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already taken"
+            )
+            
+    try:
+        db_user = models.User(
+            username=user_in.username,
+            email=user_in.email,
+            password_hash=hash_password(user_in.password),
+            role=user_in.role,
+            first_name=user_in.first_name,
+            last_name=user_in.last_name,
+            phone=user_in.phone,
+            is_active=True
+        )
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        return db_user
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to register user: {str(e)}"
+        )
+
+@app.post("/api/users/login", response_model=schemas.User, tags=["Users"])
+def login_user(login_in: UserLogin, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == login_in.email).first()
+    if not db_user or not verify_password(login_in.password, db_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password"
+        )
+    if not db_user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="User account is inactive"
+        )
+    return db_user
+
+@app.get("/api/users", response_model=List[schemas.User], tags=["Users"])
+def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return db.query(models.User).offset(skip).limit(limit).all()
+
+@app.get("/api/users/{user_id}", response_model=schemas.User, tags=["Users"])
+def get_user(user_id: int, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    return db_user
+
+@app.delete("/api/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Users"])
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    db.delete(db_user)
+    db.commit()
+    return None
+
+
+# ===================================================
+#   Xzense Analysis API Endpoints
+# ===================================================
+
+@app.post("/api/users/{user_id}/analyses", response_model=schemas.XzenseAnalysis, status_code=status.HTTP_201_CREATED, tags=["Xzense Analyses"])
+def create_analysis(user_id: int, analysis_in: schemas.XzenseAnalysisCreate, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    try:
+        db_analysis = models.XzenseAnalysis(
+            user_id=user_id,
+            title=analysis_in.title,
+            measurement_type=analysis_in.measurement_type,
+            file1_name=analysis_in.file1_name,
+            file1_data=analysis_in.file1_data,
+            file2_name=analysis_in.file2_name,
+            file2_data=analysis_in.file2_data,
+            selected_time_start=analysis_in.selected_time_start,
+            selected_time_end=analysis_in.selected_time_end,
+            avg_frequency1=analysis_in.avg_frequency1,
+            avg_frequency2=analysis_in.avg_frequency2,
+            delta_f=analysis_in.delta_f
+        )
+        db.add(db_analysis)
+        db.commit()
+        db.refresh(db_analysis)
+        return db_analysis
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create analysis: {str(e)}"
+        )
+
+@app.get("/api/analyses", response_model=List[schemas.XzenseAnalysis], tags=["Xzense Analyses"])
+def list_analyses(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return db.query(models.XzenseAnalysis).offset(skip).limit(limit).all()
+
+@app.get("/api/users/{user_id}/analyses", response_model=List[schemas.XzenseAnalysis], tags=["Xzense Analyses"])
+def list_user_analyses(user_id: int, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    return db.query(models.XzenseAnalysis).filter(models.XzenseAnalysis.user_id == user_id).all()
+
+@app.get("/api/analyses/{analysis_id}", response_model=schemas.XzenseAnalysis, tags=["Xzense Analyses"])
+def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
+    db_analysis = db.query(models.XzenseAnalysis).filter(models.XzenseAnalysis.id == analysis_id).first()
+    if not db_analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis with ID {analysis_id} not found"
+        )
+    return db_analysis
+
+@app.delete("/api/analyses/{analysis_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Xzense Analyses"])
+def delete_analysis(analysis_id: int, db: Session = Depends(get_db)):
+    db_analysis = db.query(models.XzenseAnalysis).filter(models.XzenseAnalysis.id == analysis_id).first()
+    if not db_analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Analysis with ID {analysis_id} not found"
+        )
+    db.delete(db_analysis)
+    db.commit()
+    return None
+
+
+# ===================================================
+#   Lab Registration API Endpoints
+# ===================================================
+
+class LabRegistrationStatusUpdate(BaseModel):
+    status: str
+
+@app.post("/api/users/{user_id}/registrations", response_model=schemas.LabRegistration, status_code=status.HTTP_201_CREATED, tags=["Lab Registrations"])
+def create_registration(user_id: int, reg_in: schemas.LabRegistrationCreate, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    try:
+        db_reg = models.LabRegistration(
+            user_id=user_id,
+            course_id=reg_in.course_id,
+            status=reg_in.status
+        )
+        db.add(db_reg)
+        db.commit()
+        db.refresh(db_reg)
+        return db_reg
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to register course: {str(e)}"
+        )
+
+@app.get("/api/registrations", response_model=List[schemas.LabRegistration], tags=["Lab Registrations"])
+def list_registrations(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return db.query(models.LabRegistration).offset(skip).limit(limit).all()
+
+@app.get("/api/users/{user_id}/registrations", response_model=List[schemas.LabRegistration], tags=["Lab Registrations"])
+def list_user_registrations(user_id: int, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    return db.query(models.LabRegistration).filter(models.LabRegistration.user_id == user_id).all()
+
+@app.patch("/api/registrations/{registration_id}/status", response_model=schemas.LabRegistration, tags=["Lab Registrations"])
+def update_registration_status(registration_id: int, status_update: LabRegistrationStatusUpdate, db: Session = Depends(get_db)):
+    db_reg = db.query(models.LabRegistration).filter(models.LabRegistration.id == registration_id).first()
+    if not db_reg:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Registration with ID {registration_id} not found"
+        )
+    
+    db_reg.status = status_update.status
+    db.commit()
+    db.refresh(db_reg)
+    return db_reg
+
+@app.delete("/api/registrations/{registration_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Lab Registrations"])
+def delete_registration(registration_id: int, db: Session = Depends(get_db)):
+    db_reg = db.query(models.LabRegistration).filter(models.LabRegistration.id == registration_id).first()
+    if not db_reg:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Registration with ID {registration_id} not found"
+        )
+    db.delete(db_reg)
+    db.commit()
+    return None
+
 
