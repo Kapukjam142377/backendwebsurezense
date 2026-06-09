@@ -22,7 +22,7 @@ app = FastAPI(
 # Allows the separate React frontend to securely request data from this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this in production to match your React app's domain (e.g. ['https://my-app.com'])
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
