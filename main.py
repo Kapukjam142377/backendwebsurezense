@@ -23,7 +23,7 @@ app = FastAPI(
 # Allows the separate React frontend to securely request data from this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000", "https://new-web-surazense.vercel.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,7 +36,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     
     headers = {}
     origin = request.headers.get("origin")
-    if origin in ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000"]:
+    if origin in ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000", "https://new-web-surazense.vercel.app"]:
         headers["Access-Control-Allow-Origin"] = origin
         headers["Access-Control-Allow-Credentials"] = "true"
         
