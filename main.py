@@ -1,8 +1,7 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel
 import hashlib
 import secrets
@@ -23,42 +22,11 @@ app = FastAPI(
 # Allows the separate React frontend to securely request data from this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:5000",
-        "https://new-web-surazense.vercel.app"
-    ],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    import logging
-    logging.exception(exc)
-    
-    headers = {}
-    origin = request.headers.get("origin")
-    if origin in [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:5000",
-        "https://new-web-surazense.vercel.app"
-    ]:
-        headers["Access-Control-Allow-Origin"] = origin
-        headers["Access-Control-Allow-Credentials"] = "true"
-        
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal Server Error", "message": str(exc)},
-        headers=headers
-    )
 
 @app.get("/", tags=["System Status"])
 def read_root():
@@ -294,7 +262,6 @@ def verify_password(password: str, hashed_password_str: str) -> bool:
 class UserLogin(BaseModel):
     email: str
     password: str
-    source_app: Optional[str] = None  # 'build' or 'academic'
 
 @app.post("/api/users", response_model=schemas.User, status_code=status.HTTP_201_CREATED, tags=["Users"])
 def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
@@ -348,27 +315,6 @@ def login_user(login_in: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User account is inactive"
         )
-    
-    # Check source_app restrictions if provided
-    if login_in.source_app:
-        if login_in.source_app == "build":
-            if db_user.role not in ["doctor", "patient", "admin"]:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This account is not authorized to access the company website."
-                )
-        elif login_in.source_app == "academic":
-            if db_user.role not in ["customer", "admin"]:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="This account is not authorized to access the Academic website."
-                )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid source_app parameter."
-            )
-            
     return db_user
 
 @app.get("/api/users", response_model=List[schemas.User], tags=["Users"])
