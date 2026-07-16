@@ -321,6 +321,22 @@ def login_user(login_in: UserLogin, db: Session = Depends(get_db)):
 def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
     return db.query(models.User).offset(skip).limit(limit).all()
 
+class UserRoleUpdate(BaseModel):
+    role: str
+
+@app.patch("/api/users/{user_id}/role", response_model=schemas.User, tags=["Users"])
+def update_user_role(user_id: int, role_update: UserRoleUpdate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    db_user.role = role_update.role
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
 @app.get("/api/users/{user_id}", response_model=schemas.User, tags=["Users"])
 def get_user(user_id: int, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.id == user_id).first()
