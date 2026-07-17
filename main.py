@@ -510,3 +510,137 @@ def delete_registration(registration_id: int, db: Session = Depends(get_db)):
     return None
 
 
+# ===================================================
+#   Competition Profile API Endpoints
+# ===================================================
+
+@app.post("/api/users/{user_id}/competition-profile", response_model=schemas.CompetitionProfile, status_code=status.HTTP_201_CREATED, tags=["Competition Profiles"])
+def create_competition_profile(user_id: int, profile_in: schemas.CompetitionProfileCreate, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    
+    # Check if profile already exists
+    existing_profile = db.query(models.CompetitionProfile).filter(models.CompetitionProfile.user_id == user_id).first()
+    if existing_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"User with ID {user_id} already has a competition profile"
+        )
+    
+    try:
+        db_profile = models.CompetitionProfile(
+            user_id=user_id,
+            title_name=profile_in.title_name,
+            custom_title_name=profile_in.custom_title_name,
+            nickname=profile_in.nickname,
+            middle_name=profile_in.middle_name,
+            id_number=profile_in.id_number,
+            mobile_number=profile_in.mobile_number,
+            education=profile_in.education,
+            institution_name=profile_in.institution_name,
+            current_address=profile_in.current_address,
+            institution_address=profile_in.institution_address,
+            student_card_front=profile_in.student_card_front,
+            student_card_back=profile_in.student_card_back
+        )
+        db.add(db_profile)
+        db.commit()
+        db.refresh(db_profile)
+        return db_profile
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create competition profile: {str(e)}"
+        )
+
+@app.get("/api/users/{user_id}/competition-profile", response_model=schemas.CompetitionProfile, tags=["Competition Profiles"])
+def get_user_competition_profile(user_id: int, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    
+    db_profile = db.query(models.CompetitionProfile).filter(models.CompetitionProfile.user_id == user_id).first()
+    if not db_profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Competition profile not found for user ID {user_id}"
+        )
+    return db_profile
+
+@app.get("/api/competition-profiles", response_model=List[schemas.CompetitionProfile], tags=["Competition Profiles"])
+def list_competition_profiles(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    return db.query(models.CompetitionProfile).offset(skip).limit(limit).all()
+
+@app.patch("/api/users/{user_id}/competition-profile", response_model=schemas.CompetitionProfile, tags=["Competition Profiles"])
+def update_competition_profile(user_id: int, profile_update: schemas.CompetitionProfileUpdate, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    
+    db_profile = db.query(models.CompetitionProfile).filter(models.CompetitionProfile.user_id == user_id).first()
+    if not db_profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Competition profile not found for user ID {user_id}"
+        )
+    
+    try:
+        # Update only fields provided in the body
+        update_data = profile_update.model_dump(exclude_unset=True)
+        for key, value in update_data.items():
+            setattr(db_profile, key, value)
+        
+        db.commit()
+        db.refresh(db_profile)
+        return db_profile
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update competition profile: {str(e)}"
+        )
+
+@app.delete("/api/users/{user_id}/competition-profile", status_code=status.HTTP_204_NO_CONTENT, tags=["Competition Profiles"])
+def delete_competition_profile(user_id: int, db: Session = Depends(get_db)):
+    # Check if user exists
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    
+    db_profile = db.query(models.CompetitionProfile).filter(models.CompetitionProfile.user_id == user_id).first()
+    if not db_profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Competition profile not found for user ID {user_id}"
+        )
+    
+    try:
+        db.delete(db_profile)
+        db.commit()
+        return None
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to delete competition profile: {str(e)}"
+        )
+
+
+

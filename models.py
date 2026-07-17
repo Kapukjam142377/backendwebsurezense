@@ -23,6 +23,8 @@ class User(Base):
     reports = relationship("MedicalReport", back_populates="doctor")
     analyses = relationship("XzenseAnalysis", back_populates="user")
     registrations = relationship("LabRegistration", back_populates="user")
+    competition_profile = relationship("CompetitionProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+
 
 class Patient(Base):
     __tablename__ = "patients"
@@ -183,3 +185,26 @@ class LabRegistration(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="registrations")
+
+class CompetitionProfile(Base):
+    __tablename__ = "competition_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    title_name = Column(String(50), nullable=True)
+    custom_title_name = Column(String(100), nullable=True)
+    nickname = Column(String(100), nullable=True)
+    middle_name = Column(String(100), nullable=True)
+    id_number = Column(String(20), nullable=True)
+    mobile_number = Column(String(20), nullable=True)
+    education = Column(String(100), nullable=True)
+    institution_name = Column(String(255), nullable=True)
+    current_address = Column(Text, nullable=True)
+    institution_address = Column(Text, nullable=True)
+    student_card_front = Column(Text, nullable=True)
+    student_card_back = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="competition_profile")
+

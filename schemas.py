@@ -14,13 +14,55 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str
 
+# Competition Profile Schemas
+class CompetitionProfileBase(BaseModel):
+    title_name: Optional[str] = None
+    custom_title_name: Optional[str] = None
+    nickname: Optional[str] = None
+    middle_name: Optional[str] = None
+    id_number: Optional[str] = None
+    mobile_number: Optional[str] = None
+    education: Optional[str] = None
+    institution_name: Optional[str] = None
+    current_address: Optional[str] = None
+    institution_address: Optional[str] = None
+    student_card_front: Optional[str] = None
+    student_card_back: Optional[str] = None
+
+class CompetitionProfileCreate(CompetitionProfileBase):
+    pass
+
+class CompetitionProfileUpdate(BaseModel):
+    title_name: Optional[str] = None
+    custom_title_name: Optional[str] = None
+    nickname: Optional[str] = None
+    middle_name: Optional[str] = None
+    id_number: Optional[str] = None
+    mobile_number: Optional[str] = None
+    education: Optional[str] = None
+    institution_name: Optional[str] = None
+    current_address: Optional[str] = None
+    institution_address: Optional[str] = None
+    student_card_front: Optional[str] = None
+    student_card_back: Optional[str] = None
+
+class CompetitionProfile(CompetitionProfileBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
 class User(UserBase):
     id: int
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    competition_profile: Optional[CompetitionProfile] = None
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 # Patient Schemas

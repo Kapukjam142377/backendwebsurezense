@@ -178,3 +178,28 @@ CREATE TABLE IF NOT EXISTS lab_registrations (
     registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+
+-- 12. Competition Profiles Table
+CREATE TABLE IF NOT EXISTS competition_profiles (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    title_name VARCHAR(50),
+    custom_title_name VARCHAR(100),
+    nickname VARCHAR(100),
+    middle_name VARCHAR(100),
+    id_number VARCHAR(20),
+    mobile_number VARCHAR(20),
+    education VARCHAR(100),
+    institution_name VARCHAR(255),
+    current_address TEXT,
+    institution_address TEXT,
+    student_card_front TEXT,
+    student_card_back TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for fast lookup of competition profiles by user_id
+CREATE INDEX IF NOT EXISTS idx_competition_profiles_user ON competition_profiles(user_id);
+
