@@ -5,9 +5,14 @@ from typing import List
 from pydantic import BaseModel
 import hashlib
 import secrets
+import os
+import stripe
+from dotenv import load_dotenv
 import models
 import schemas
 from database import engine, get_db
+
+load_dotenv()
 
 # Create all database tables on startup (if they do not exist yet)
 models.Base.metadata.create_all(bind=engine)
@@ -222,6 +227,55 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
     db.delete(db_order)
     db.commit()
     return None
+
+# 6. Create Stripe Checkout Session
+@app.post("/api/checkout/create-session", tags=["Stripe Checkout"])
+def create_stripe_checkout_session(order_in: schemas.OrderCreate):
+    try:
+        stripe_key = os.getenv("STRIPE_SECRET_KEY")
+        if not stripe_key:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="STRIPE_SECRET_KEY is not configured on the server."
+            )
+        stripe.api_key = stripe_key
+
+        line_items = []
+        for item in order_in.items:
+            line_items.append({
+                "price_data": {
+                    "currency": "thb",
+                    "product_data": {
+                        "name": item.product_name,
+                    },
+                    "unit_amount": int(round(item.price * 100)), # Amount in smallest currency unit (satang/cents)
+                },
+                "quantity": item.quantity,
+            })
+
+        domain_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=line_items,
+            mode="payment",
+            customer_email=order_in.customer_email,
+            success_url=f"{domain_url}/checkout?status=success",
+            cancel_url=f"{domain_url}/checkout?status=cancel",
+            metadata={
+                "customer_name": order_in.customer_name,
+                "customer_email": order_in.customer_email,
+                "shipping_address": order_in.shipping_address,
+            }
+        )
+
+        return {"checkout_url": session.url, "session_id": session.id}
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create Stripe Checkout session: {str(e)}"
+        )
 
 
 # ===================================================
