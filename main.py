@@ -12,7 +12,7 @@ import models
 import schemas
 from database import engine, get_db
 
-load_dotenv()
+load_dotenv()  # Loaded environment variables including FRONTEND_URL and database URL
 
 # Create all database tables on startup (if they do not exist yet)
 models.Base.metadata.create_all(bind=engine)
@@ -141,17 +141,26 @@ def delete_report(report_id: int, db: Session = Depends(get_db)):
 @app.post("/api/orders", response_model=schemas.Order, status_code=status.HTTP_201_CREATED, tags=["eCommerce Orders"])
 def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
     try:
+        # Check if this Stripe session already has a recorded transaction (prevents duplicate orders on double-submit/refresh)
+        if order_in.stripe_session_id:
+            existing_tx = db.query(models.PaymentTransaction).filter(models.PaymentTransaction.transaction_ref == order_in.stripe_session_id).first()
+            if existing_tx:
+                existing_order = db.query(models.Order).filter(models.Order.id == existing_tx.order_id).first()
+                if existing_order:
+                    return existing_order
+
         # Calculate total price of all order items
         total_amount = sum(item.price * item.quantity for item in order_in.items)
 
         # Create Order Header
         db_order = models.Order(
+            user_id=order_in.user_id,
             customer_name=order_in.customer_name,
             customer_email=order_in.customer_email,
             customer_phone=order_in.customer_phone,
             shipping_address=order_in.shipping_address,
             payment_method=order_in.payment_method,
-            payment_status="pending",
+            payment_status=order_in.payment_status or "pending",
             order_status="received",
             total_amount=total_amount
         )
@@ -169,14 +178,29 @@ def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
             )
             db.add(db_item)
 
+        # Create Payment Transaction if stripe_session_id is provided
+        if order_in.stripe_session_id:
+            db_tx = models.PaymentTransaction(
+                order_id=db_order.id,
+                gateway="Stripe",
+                transaction_ref=order_in.stripe_session_id,
+                amount=total_amount,
+                currency="THB",
+                status="success" if order_in.payment_status == "paid" else "pending",
+                payment_method="card"
+            )
+            db.add(db_tx)
+
         db.commit()
         db.refresh(db_order)
         return db_order
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to place order: {str(e)}"
+            detail=f"Failed to place order ({type(e).__name__}): {str(e)}"
         )
 
 # 2. List All Orders
@@ -260,7 +284,7 @@ def create_stripe_checkout_session(order_in: schemas.OrderCreate):
             line_items=line_items,
             mode="payment",
             customer_email=order_in.customer_email,
-            success_url=f"{domain_url}/checkout?status=success",
+            success_url=f"{domain_url}/checkout?status=success&session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{domain_url}/checkout?status=cancel",
             metadata={
                 "customer_name": order_in.customer_name,

@@ -215,9 +215,11 @@ class OrderBase(BaseModel):
     customer_phone: Optional[str] = None
     shipping_address: str
     payment_method: str
+    payment_status: Optional[str] = "pending"
 
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
+    stripe_session_id: Optional[str] = None
 
 class OrderStatusUpdate(BaseModel):
     payment_status: Optional[str] = None
