@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import List
 from pydantic import BaseModel
@@ -7,15 +8,45 @@ import hashlib
 import secrets
 import os
 import stripe
+import jwt
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import models
 import schemas
+import database
 from database import engine, get_db
 
 load_dotenv()  # Loaded environment variables including FRONTEND_URL and database URL
 
+# JWT Config
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "surezense_secret_key_change_in_production_2026")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 # 7 days
+
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
 # Create all database tables on startup (if they do not exist yet)
 models.Base.metadata.create_all(bind=engine)
+
+# Auto-migrate table columns for existing databases
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255);"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token_expires TIMESTAMP;"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;"))
+        conn.commit()
+except Exception as migrate_err:
+    print(f"[DB MIGRATION NOTICE] Auto-column migration note: {migrate_err}")
 
 app = FastAPI(
     title="Surazense Cancer Report API",
@@ -334,7 +365,7 @@ def verify_password(password: str, hashed_password_str: str) -> bool:
 
 
 # ===================================================
-#   User Management API Endpoints
+#   User Management & Auth API Endpoints
 # ===================================================
 
 class UserLogin(BaseModel):
@@ -359,6 +390,9 @@ def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
             )
             
     try:
+        verif_token = secrets.token_urlsafe(32)
+        verif_expires = datetime.now() + timedelta(hours=24)
+        
         db_user = models.User(
             username=user_in.username,
             email=user_in.email,
@@ -367,11 +401,19 @@ def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
             first_name=user_in.first_name,
             last_name=user_in.last_name,
             phone=user_in.phone,
-            is_active=True
+            is_active=True,
+            is_verified=False,
+            verification_token=verif_token,
+            verification_token_expires=verif_expires
         )
         db.add(db_user)
         db.commit()
         db.refresh(db_user)
+        
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        verif_link = f"{frontend_url}/verify-email?token={verif_token}"
+        print(f"[AUTH DEV LOG] New Registration - Verification link for {user_in.email}: {verif_link}")
+        
         return db_user
     except Exception as e:
         db.rollback()
@@ -380,7 +422,7 @@ def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
             detail=f"Failed to register user: {str(e)}"
         )
 
-@app.post("/api/users/login", response_model=schemas.User, tags=["Users"])
+@app.post("/api/users/login", response_model=schemas.TokenResponse, tags=["Users"])
 def login_user(login_in: UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(models.User).filter(models.User.email == login_in.email).first()
     if not db_user or not verify_password(login_in.password, db_user.password_hash):
@@ -393,7 +435,141 @@ def login_user(login_in: UserLogin, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="User account is inactive"
         )
-    return db_user
+        
+    access_token = create_access_token(data={"sub": str(db_user.id), "email": db_user.email, "role": db_user.role})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": db_user
+    }
+
+@app.post("/api/users/forgot-password", tags=["Users Password Reset"])
+def forgot_password(req: schemas.ForgotPasswordRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == req.email).first()
+    if not db_user:
+        return {"message": "If the email is registered, a password reset link has been sent."}
+    
+    reset_tok = secrets.token_urlsafe(32)
+    db_user.reset_token = reset_tok
+    db_user.reset_token_expires = datetime.now() + timedelta(hours=1)
+    db.commit()
+    
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    reset_link = f"{frontend_url}/reset-password?token={reset_tok}"
+    print(f"[AUTH DEV LOG] Password reset link for {req.email}: {reset_link}")
+    
+    return {
+        "message": "If the email is registered, a password reset link has been sent.",
+        "reset_token": reset_tok
+    }
+
+@app.post("/api/users/verify-reset-token", tags=["Users Password Reset"])
+def verify_reset_token(req: schemas.VerifyResetTokenRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.reset_token == req.token).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid reset token"
+        )
+    if db_user.reset_token_expires and db_user.reset_token_expires < datetime.now():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired"
+        )
+    return {
+        "valid": True,
+        "email": db_user.email
+    }
+
+@app.post("/api/users/reset-password", tags=["Users Password Reset"])
+def reset_password(req: schemas.ResetPasswordRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.reset_token == req.token).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid reset token"
+        )
+    if db_user.reset_token_expires and db_user.reset_token_expires < datetime.now():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reset token has expired"
+        )
+    
+    db_user.password_hash = hash_password(req.new_password)
+    db_user.reset_token = None
+    db_user.reset_token_expires = None
+    db.commit()
+    
+    return {"message": "Password reset successfully. You may now log in with your new password."}
+
+@app.post("/api/users/verify-email", tags=["Users Email Verification"])
+def verify_email(req: schemas.VerifyEmailRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.verification_token == req.token).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid verification token"
+        )
+    if db_user.verification_token_expires and db_user.verification_token_expires < datetime.now():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification token has expired"
+        )
+    
+    db_user.is_verified = True
+    db_user.verification_token = None
+    db_user.verification_token_expires = None
+    db.commit()
+    
+    return {"message": "Email verified successfully", "is_verified": True}
+
+@app.post("/api/users/resend-verification", tags=["Users Email Verification"])
+def resend_verification(req: schemas.ResendVerificationRequest, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == req.email).first()
+    if not db_user:
+        return {"message": "If the email is registered, a new verification link has been sent."}
+    
+    if db_user.is_verified:
+        return {"message": "Email is already verified."}
+        
+    verif_tok = secrets.token_urlsafe(32)
+    db_user.verification_token = verif_tok
+    db_user.verification_token_expires = datetime.now() + timedelta(hours=24)
+    db.commit()
+    
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    verif_link = f"{frontend_url}/verify-email?token={verif_tok}"
+    print(f"[AUTH DEV LOG] Email verification link for {req.email}: {verif_link}")
+    
+    return {
+        "message": "If the email is registered, a new verification link has been sent.",
+        "verification_token": verif_tok
+    }
+
+@app.get("/api/auth/{provider}", response_model=schemas.SocialAuthResponse, tags=["Social Auth"])
+def get_social_auth_url(provider: str):
+    provider_lower = provider.lower()
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+    
+    if provider_lower == "google":
+        client_id = os.getenv("GOOGLE_CLIENT_ID", "mock-google-client-id")
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={client_id}&redirect_uri={frontend_url}/auth/google/callback&scope=openid%20email%20profile"
+    elif provider_lower in ["facebook", "fb"]:
+        client_id = os.getenv("FACEBOOK_CLIENT_ID", "mock-facebook-client-id")
+        auth_url = f"https://www.facebook.com/v18.0/dialog/oauth?client_id={client_id}&redirect_uri={frontend_url}/auth/facebook/callback&scope=email,public_profile"
+    elif provider_lower == "line":
+        client_id = os.getenv("LINE_CHANNEL_ID", "mock-line-channel-id")
+        auth_url = f"https://access.line.me/oauth2/v2.1/authorize?response_type=code&client_id={client_id}&redirect_uri={frontend_url}/auth/line/callback&state=surezense_state&scope=profile%20openid%20email"
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported provider '{provider}'. Supported providers: google, facebook, line."
+        )
+        
+    return {
+        "provider": provider_lower,
+        "auth_url": auth_url
+    }
 
 @app.get("/api/users", response_model=List[schemas.User], tags=["Users"])
 def list_users(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):

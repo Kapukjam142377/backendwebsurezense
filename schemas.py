@@ -57,11 +57,39 @@ class CompetitionProfile(CompetitionProfileBase):
 class User(UserBase):
     id: int
     is_active: bool
+    is_verified: bool = False
     created_at: datetime
     updated_at: datetime
     competition_profile: Optional[CompetitionProfile] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Auth Schemas
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: User
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class VerifyResetTokenRequest(BaseModel):
+    token: str
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+class ResendVerificationRequest(BaseModel):
+    email: str
+
+class SocialAuthResponse(BaseModel):
+    provider: str
+    auth_url: str
 
 
 

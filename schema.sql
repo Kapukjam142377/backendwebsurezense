@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS users (
     last_name VARCHAR(100),
     phone VARCHAR(50),
     is_active BOOLEAN DEFAULT TRUE,
+    is_verified BOOLEAN DEFAULT FALSE,
+    verification_token VARCHAR(255),
+    verification_token_expires TIMESTAMP,
+    reset_token VARCHAR(255),
+    reset_token_expires TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

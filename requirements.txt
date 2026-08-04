@@ -5,3 +5,5 @@ psycopg2-binary>=2.9.9
 pydantic>=2.9.0
 python-dotenv>=1.0.1
 stripe
+PyJWT>=2.8.0
+
