@@ -1,14 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Header
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 import hashlib
 import secrets
 import os
 import stripe
 import jwt
+import smtplib
+import threading
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import models
@@ -32,6 +36,110 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+# ===================================================
+#   JWT Auth Dependency
+# ===================================================
+
+def get_current_user_id(authorization: Optional[str] = Header(None)) -> int:
+    """Extract and validate JWT token from Authorization header, return user ID."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+        return int(user_id_str)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+# ===================================================
+#   Email Service
+# ===================================================
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+EMAIL_ENABLED = bool(SMTP_USER and SMTP_PASS)
+
+
+def _send_email_background(to_email: str, subject: str, html_body: str):
+    """Send an HTML email in a background thread. Logs errors without crashing."""
+    if not EMAIL_ENABLED:
+        print(f"[EMAIL DISABLED] Would send '{subject}' to {to_email}")
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_email
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [to_email], msg.as_string())
+        print(f"[EMAIL SENT] '{subject}' → {to_email}")
+    except Exception as e:
+        print(f"[EMAIL ERROR] Failed to send '{subject}' to {to_email}: {e}")
+
+
+def send_email(to_email: str, subject: str, html_body: str):
+    """Fire-and-forget email sending (non-blocking)."""
+    t = threading.Thread(target=_send_email_background, args=(to_email, subject, html_body), daemon=True)
+    t.start()
+
+
+def email_verification_html(name: str, verify_link: str) -> str:
+    display_name = name or "ผู้ใช้งาน"
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:32px;border-radius:12px">
+      <div style="background:linear-gradient(135deg,#0ea5e9,#6366f1);padding:24px;border-radius:8px;text-align:center;margin-bottom:24px">
+        <h1 style="color:white;margin:0;font-size:24px">Surazense</h1>
+        <p style="color:rgba(255,255,255,0.85);margin:8px 0 0">ยืนยันอีเมลของคุณ</p>
+      </div>
+      <h2 style="color:#1e293b;margin:0 0 12px">สวัสดี {display_name}</h2>
+      <p style="color:#475569;line-height:1.6">ขอบคุณสำหรับการสมัครสมาชิก! กรุณากดปุ่มด้านล่างเพื่อยืนยันอีเมลของคุณ</p>
+      <div style="text-align:center;margin:32px 0">
+        <a href="{verify_link}" style="background:linear-gradient(135deg,#0ea5e9,#6366f1);color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">ยืนยันอีเมล</a>
+      </div>
+      <p style="color:#94a3b8;font-size:13px">ลิงก์นี้จะหมดอายุใน 24 ชั่วโมง หากคุณไม่ได้สมัครสมาชิก กรุณาเพิกเฉยต่ออีเมลนี้</p>
+      <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+      <p style="color:#94a3b8;font-size:12px;text-align:center">© 2026 Surazense · ระบบตรวจสอบมะเร็ง</p>
+    </div>
+    """
+
+
+def email_reset_password_html(name: str, reset_link: str) -> str:
+    display_name = name or "ผู้ใช้งาน"
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;background:#f8fafc;padding:32px;border-radius:12px">
+      <div style="background:linear-gradient(135deg,#f59e0b,#ef4444);padding:24px;border-radius:8px;text-align:center;margin-bottom:24px">
+        <h1 style="color:white;margin:0;font-size:24px">Surazense</h1>
+        <p style="color:rgba(255,255,255,0.85);margin:8px 0 0">รีเซ็ตรหัสผ่าน</p>
+      </div>
+      <h2 style="color:#1e293b;margin:0 0 12px">สวัสดี {display_name}</h2>
+      <p style="color:#475569;line-height:1.6">เราได้รับคำขอรีเซ็ตรหัสผ่านสำหรับบัญชีของคุณ กรุณากดปุ่มด้านล่างเพื่อตั้งรหัสผ่านใหม่</p>
+      <div style="text-align:center;margin:32px 0">
+        <a href="{reset_link}" style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:white;padding:14px 32px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:16px">รีเซ็ตรหัสผ่าน</a>
+      </div>
+      <p style="color:#94a3b8;font-size:13px">ลิงก์นี้จะหมดอายุใน 1 ชั่วโมง หากคุณไม่ได้ขอรีเซ็ต กรุณาเพิกเฉยต่ออีเมลนี้</p>
+      <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0">
+      <p style="color:#94a3b8;font-size:12px;text-align:center">© 2026 Surazense · ระบบตรวจสอบมะเร็ง</p>
+    </div>
+    """
 
 # Create all database tables on startup (if they do not exist yet)
 models.Base.metadata.create_all(bind=engine)
@@ -224,6 +332,48 @@ def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
 
         db.commit()
         db.refresh(db_order)
+        
+        # Create In-App Notifications for Order Creation
+        try:
+            target_user_id = db_order.user_id
+            if not target_user_id:
+                user_match = db.query(models.User).filter(models.User.email == db_order.customer_email).first()
+                if user_match:
+                    target_user_id = user_match.id
+
+            customer_notif = models.Notification(
+                user_id=target_user_id,
+                title=f"ยืนยันคำสั่งซื้อ #{db_order.id}",
+                message=f"คำสั่งซื้อของคุณหมายเลข #{db_order.id} ยอดรวม ฿{float(db_order.total_amount):,.2f} ถูกสร้างเรียบร้อยแล้ว",
+                type="order",
+                reference_id=db_order.id,
+                is_read=False
+            )
+            db.add(customer_notif)
+
+            admin_notif = models.Notification(
+                user_id=None,
+                title=f"คำสั่งซื้อใหม่ #{db_order.id}",
+                message=f"คำสั่งซื้อใหม่จาก {db_order.customer_name} ({db_order.customer_email}) ยอดรวม ฿{float(db_order.total_amount):,.2f}",
+                type="order",
+                reference_id=db_order.id,
+                is_read=False
+            )
+            db.add(admin_notif)
+            db.commit()
+        except Exception as notif_err:
+            print(f"[NOTIFICATION NOTICE] Failed to create order notification: {notif_err}")
+        
+        # Send order confirmation email (non-blocking)
+        try:
+            send_email(
+                to_email=db_order.customer_email,
+                subject=f"[Surazense] ยืนยันคำสั่งซื้อ #{db_order.id}",
+                html_body=email_order_confirmation_html(db_order)
+            )
+        except Exception:
+            pass  # Email failure must not block order creation
+        
         return db_order
     except Exception as e:
         import traceback
@@ -261,6 +411,9 @@ def update_order_status(order_id: int, status_update: schemas.OrderStatusUpdate,
             detail=f"Order with ID {order_id} not found"
         )
     
+    old_order_status = db_order.order_status
+    old_payment_status = db_order.payment_status
+    
     if status_update.payment_status is not None:
         db_order.payment_status = status_update.payment_status
     if status_update.order_status is not None:
@@ -268,7 +421,72 @@ def update_order_status(order_id: int, status_update: schemas.OrderStatusUpdate,
         
     db.commit()
     db.refresh(db_order)
+    
+    # Auto Notification on order status or payment status change
+    if status_update.order_status is not None and status_update.order_status != old_order_status:
+        try:
+            target_user_id = db_order.user_id
+            if not target_user_id:
+                user_match = db.query(models.User).filter(models.User.email == db_order.customer_email).first()
+                if user_match:
+                    target_user_id = user_match.id
+            
+            notif = models.Notification(
+                user_id=target_user_id,
+                title=f"อัปเดตสถานะคำสั่งซื้อ #{db_order.id}",
+                message=f"คำสั่งซื้อ #{db_order.id} เปลี่ยนสถานะเป็น '{db_order.order_status}'",
+                type="order",
+                reference_id=db_order.id,
+                is_read=False
+            )
+            db.add(notif)
+            db.commit()
+        except Exception as notif_err:
+            print(f"[NOTIFICATION NOTICE] Failed to create order status notification: {notif_err}")
+
+    if status_update.payment_status is not None and status_update.payment_status != old_payment_status:
+        try:
+            target_user_id = db_order.user_id
+            if not target_user_id:
+                user_match = db.query(models.User).filter(models.User.email == db_order.customer_email).first()
+                if user_match:
+                    target_user_id = user_match.id
+
+            notif = models.Notification(
+                user_id=target_user_id,
+                title=f"อัปเดตการชำระเงิน #{db_order.id}",
+                message=f"คำสั่งซื้อ #{db_order.id} เปลี่ยนสถานะการชำระเงินเป็น '{db_order.payment_status}'",
+                type="order",
+                reference_id=db_order.id,
+                is_read=False
+            )
+            db.add(notif)
+            db.commit()
+        except Exception as notif_err:
+            print(f"[NOTIFICATION NOTICE] Failed to create payment status notification: {notif_err}")
+    
+    # Send status update email if status actually changed (non-blocking)
+    if status_update.order_status is not None and status_update.order_status != old_order_status:
+        try:
+            send_email(
+                to_email=db_order.customer_email,
+                subject=f"[Surazense] อัปเดตสถานะคำสั่งซื้อ #{db_order.id}",
+                html_body=email_order_status_html(db_order, "order_status")
+            )
+        except Exception:
+            pass
+    elif status_update.payment_status is not None and status_update.payment_status != old_payment_status:
+        try:
+            send_email(
+                to_email=db_order.customer_email,
+                subject=f"[Surazense] อัปเดตสถานะการชำระเงิน #{db_order.id}",
+                html_body=email_order_status_html(db_order, "payment_status")
+            )
+        except Exception:
+            pass
+    
     return db_order
+
 
 # 5. Delete / Cancel Order
 @app.delete("/api/orders/{order_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["eCommerce Orders"])
@@ -414,6 +632,14 @@ def register_user(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
         verif_link = f"{frontend_url}/verify-email?token={verif_token}"
         print(f"[AUTH DEV LOG] New Registration - Verification link for {user_in.email}: {verif_link}")
         
+        # Send verification email (non-blocking)
+        display_name = f"{user_in.first_name or ''} {user_in.last_name or ''}".strip() or user_in.username or user_in.email
+        send_email(
+            to_email=user_in.email,
+            subject="[Surazense] ยืนยันอีเมลของคุณ / Verify your email",
+            html_body=email_verification_html(display_name, verif_link)
+        )
+        
         return db_user
     except Exception as e:
         db.rollback()
@@ -457,6 +683,14 @@ def forgot_password(req: schemas.ForgotPasswordRequest, db: Session = Depends(ge
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
     reset_link = f"{frontend_url}/reset-password?token={reset_tok}"
     print(f"[AUTH DEV LOG] Password reset link for {req.email}: {reset_link}")
+    
+    # Send reset password email (non-blocking)
+    display_name = f"{db_user.first_name or ''} {db_user.last_name or ''}".strip() or db_user.username or req.email
+    send_email(
+        to_email=req.email,
+        subject="[Surazense] รีเซ็ตรหัสผ่าน / Reset your password",
+        html_body=email_reset_password_html(display_name, reset_link)
+    )
     
     return {
         "message": "If the email is registered, a password reset link has been sent.",
@@ -541,10 +775,69 @@ def resend_verification(req: schemas.ResendVerificationRequest, db: Session = De
     verif_link = f"{frontend_url}/verify-email?token={verif_tok}"
     print(f"[AUTH DEV LOG] Email verification link for {req.email}: {verif_link}")
     
+    # Resend verification email (non-blocking)
+    display_name = f"{db_user.first_name or ''} {db_user.last_name or ''}".strip() or db_user.username or req.email
+    send_email(
+        to_email=req.email,
+        subject="[Surazense] ยืนยันอีเมลของคุณ / Verify your email",
+        html_body=email_verification_html(display_name, verif_link)
+    )
+    
     return {
         "message": "If the email is registered, a new verification link has been sent.",
         "verification_token": verif_tok
     }
+
+# ===================================================
+#   GET /api/users/me  —  Current User Profile
+# ===================================================
+
+@app.get("/api/users/me", response_model=schemas.User, tags=["Users"])
+def get_me(current_user_id: int = Depends(get_current_user_id), db: Session = Depends(get_db)):
+    """Return the authenticated user's full profile (requires Bearer token)."""
+    db_user = db.query(models.User).filter(models.User.id == current_user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    return db_user
+
+
+# ===================================================
+#   PATCH /api/users/{user_id}  —  Update Profile
+# ===================================================
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+
+@app.patch("/api/users/{user_id}", response_model=schemas.User, tags=["Users"])
+def update_user(user_id: int, update: UserUpdate, db: Session = Depends(get_db)):
+    """Update a user's profile fields (partial update — only provided fields are changed)."""
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    update_data = update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_user, key, value)
+    try:
+        db.commit()
+        db.refresh(db_user)
+        return db_user
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update user: {str(e)}"
+        )
+
 
 @app.get("/api/auth/{provider}", response_model=schemas.SocialAuthResponse, tags=["Social Auth"])
 def get_social_auth_url(provider: str):
@@ -895,6 +1188,212 @@ def delete_competition_profile(user_id: int, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to delete competition profile: {str(e)}"
         )
+
+
+# ===================================================
+#   Announcements API Endpoints
+# ===================================================
+
+@app.post("/api/announcements", response_model=schemas.Announcement, status_code=status.HTTP_201_CREATED, tags=["News & Announcements"])
+def create_announcement(announcement_in: schemas.AnnouncementCreate, db: Session = Depends(get_db)):
+    try:
+        db_announcement = models.Announcement(
+            title=announcement_in.title,
+            content=announcement_in.content,
+            summary=announcement_in.summary,
+            category=announcement_in.category,
+            image_url=announcement_in.image_url,
+            is_published=announcement_in.is_published,
+            is_pinned=announcement_in.is_pinned,
+            author_id=announcement_in.author_id
+        )
+        db.add(db_announcement)
+        db.commit()
+        db.refresh(db_announcement)
+
+        # Broadcast notification if published & pinned
+        if db_announcement.is_published and db_announcement.is_pinned:
+            try:
+                broadcast_notif = models.Notification(
+                    user_id=None,
+                    title=f"ประกาศข่าวสารใหม่: {db_announcement.title}",
+                    message=db_announcement.summary or db_announcement.content[:150],
+                    type="announcement",
+                    reference_id=db_announcement.id,
+                    is_read=False
+                )
+                db.add(broadcast_notif)
+                db.commit()
+            except Exception:
+                pass
+
+        return db_announcement
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create announcement: {str(e)}"
+        )
+
+@app.get("/api/announcements", response_model=List[schemas.Announcement], tags=["News & Announcements"])
+def list_announcements(
+    category: Optional[str] = None,
+    is_published: Optional[bool] = None,
+    is_pinned: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Announcement)
+    if category:
+        query = query.filter(models.Announcement.category == category)
+    if is_published is not None:
+        query = query.filter(models.Announcement.is_published == is_published)
+    if is_pinned is not None:
+        query = query.filter(models.Announcement.is_pinned == is_pinned)
+    
+    announcements = query.order_by(models.Announcement.is_pinned.desc(), models.Announcement.created_at.desc()).offset(skip).limit(limit).all()
+    return announcements
+
+@app.get("/api/announcements/{announcement_id}", response_model=schemas.Announcement, tags=["News & Announcements"])
+def get_announcement(announcement_id: int, db: Session = Depends(get_db)):
+    db_announcement = db.query(models.Announcement).filter(models.Announcement.id == announcement_id).first()
+    if not db_announcement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Announcement with ID {announcement_id} not found"
+        )
+    return db_announcement
+
+@app.patch("/api/announcements/{announcement_id}", response_model=schemas.Announcement, tags=["News & Announcements"])
+def update_announcement(announcement_id: int, update_in: schemas.AnnouncementUpdate, db: Session = Depends(get_db)):
+    db_announcement = db.query(models.Announcement).filter(models.Announcement.id == announcement_id).first()
+    if not db_announcement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Announcement with ID {announcement_id} not found"
+        )
+    
+    update_data = update_in.model_dump(exclude_unset=True)
+    for field, val in update_data.items():
+        setattr(db_announcement, field, val)
+        
+    db.commit()
+    db.refresh(db_announcement)
+    return db_announcement
+
+@app.delete("/api/announcements/{announcement_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["News & Announcements"])
+def delete_announcement(announcement_id: int, db: Session = Depends(get_db)):
+    db_announcement = db.query(models.Announcement).filter(models.Announcement.id == announcement_id).first()
+    if not db_announcement:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Announcement with ID {announcement_id} not found"
+        )
+    db.delete(db_announcement)
+    db.commit()
+    return None
+
+
+# ===================================================
+#   Notifications API Endpoints
+# ===================================================
+
+@app.post("/api/notifications", response_model=schemas.Notification, status_code=status.HTTP_201_CREATED, tags=["Notifications"])
+def create_notification(notif_in: schemas.NotificationCreate, db: Session = Depends(get_db)):
+    try:
+        db_notif = models.Notification(
+            user_id=notif_in.user_id,
+            title=notif_in.title,
+            message=notif_in.message,
+            type=notif_in.type,
+            reference_id=notif_in.reference_id,
+            is_read=notif_in.is_read
+        )
+        db.add(db_notif)
+        db.commit()
+        db.refresh(db_notif)
+        return db_notif
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create notification: {str(e)}"
+        )
+
+@app.get("/api/notifications", response_model=List[schemas.Notification], tags=["Notifications"])
+def list_all_notifications(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """List all notifications (Admin view)"""
+    return db.query(models.Notification).order_by(models.Notification.created_at.desc()).offset(skip).limit(limit).all()
+
+@app.get("/api/users/{user_id}/notifications", response_model=List[schemas.Notification], tags=["Notifications"])
+def list_user_notifications(
+    user_id: int,
+    is_read: Optional[bool] = None,
+    type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db)
+):
+    """List notifications for a specific user (includes personal & broadcast notifications)"""
+    query = db.query(models.Notification).filter(
+        (models.Notification.user_id == user_id) | (models.Notification.user_id == None)
+    )
+    if is_read is not None:
+        query = query.filter(models.Notification.is_read == is_read)
+    if type:
+        query = query.filter(models.Notification.type == type)
+        
+    return query.order_by(models.Notification.created_at.desc()).offset(skip).limit(limit).all()
+
+@app.get("/api/users/{user_id}/notifications/unread-count", response_model=schemas.UnreadCountResponse, tags=["Notifications"])
+def get_unread_notification_count(user_id: int, db: Session = Depends(get_db)):
+    """Get total count of unread notifications for a user"""
+    count = db.query(models.Notification).filter(
+        (models.Notification.user_id == user_id) | (models.Notification.user_id == None),
+        models.Notification.is_read == False
+    ).count()
+    return {"user_id": user_id, "unread_count": count}
+
+@app.patch("/api/notifications/{notification_id}/read", response_model=schemas.Notification, tags=["Notifications"])
+def mark_notification_read(notification_id: int, db: Session = Depends(get_db)):
+    db_notif = db.query(models.Notification).filter(models.Notification.id == notification_id).first()
+    if not db_notif:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Notification with ID {notification_id} not found"
+        )
+    db_notif.is_read = True
+    db.commit()
+    db.refresh(db_notif)
+    return db_notif
+
+@app.patch("/api/users/{user_id}/notifications/read-all", tags=["Notifications"])
+def mark_all_user_notifications_read(user_id: int, db: Session = Depends(get_db)):
+    """Mark all unread notifications for a user as read"""
+    notifications = db.query(models.Notification).filter(
+        (models.Notification.user_id == user_id) | (models.Notification.user_id == None),
+        models.Notification.is_read == False
+    ).all()
+    
+    for notif in notifications:
+        notif.is_read = True
+        
+    db.commit()
+    return {"status": "success", "marked_count": len(notifications)}
+
+@app.delete("/api/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Notifications"])
+def delete_notification(notification_id: int, db: Session = Depends(get_db)):
+    db_notif = db.query(models.Notification).filter(models.Notification.id == notification_id).first()
+    if not db_notif:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Notification with ID {notification_id} not found"
+        )
+    db.delete(db_notif)
+    db.commit()
+    return None
+
 
 
 

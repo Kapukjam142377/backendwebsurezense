@@ -306,3 +306,61 @@ class LabRegistration(LabRegistrationBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Announcement Schemas
+class AnnouncementBase(BaseModel):
+    title: str
+    content: str
+    summary: Optional[str] = None
+    category: str = "general" # 'general', 'news', 'promotion', 'system', 'medical'
+    image_url: Optional[str] = None
+    is_published: bool = True
+    is_pinned: bool = False
+    author_id: Optional[int] = None
+
+class AnnouncementCreate(AnnouncementBase):
+    pass
+
+class AnnouncementUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    summary: Optional[str] = None
+    category: Optional[str] = None
+    image_url: Optional[str] = None
+    is_published: Optional[bool] = None
+    is_pinned: Optional[bool] = None
+
+class Announcement(AnnouncementBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Notification Schemas
+class NotificationBase(BaseModel):
+    user_id: Optional[int] = None
+    title: str
+    message: str
+    type: str = "system" # 'order', 'announcement', 'system', 'report'
+    reference_id: Optional[int] = None
+    is_read: bool = False
+
+class NotificationCreate(NotificationBase):
+    pass
+
+class NotificationUpdate(BaseModel):
+    is_read: Optional[bool] = None
+
+class Notification(NotificationBase):
+    id: int
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class UnreadCountResponse(BaseModel):
+    user_id: int
+    unread_count: int
+

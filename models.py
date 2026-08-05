@@ -29,6 +29,7 @@ class User(Base):
     analyses = relationship("XzenseAnalysis", back_populates="user")
     registrations = relationship("LabRegistration", back_populates="user")
     competition_profile = relationship("CompetitionProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
 
 
 class Patient(Base):
@@ -212,4 +213,37 @@ class CompetitionProfile(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="competition_profile")
+
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    summary = Column(String(500), nullable=True)
+    category = Column(String(100), default="general") # 'general', 'news', 'promotion', 'system', 'medical'
+    image_url = Column(String(500), nullable=True)
+    is_published = Column(Boolean, default=True)
+    is_pinned = Column(Boolean, default=False)
+    author_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    author = relationship("User")
+
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    type = Column(String(50), nullable=False, default="system") # 'order', 'announcement', 'system', 'report'
+    reference_id = Column(Integer, nullable=True)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", back_populates="notifications")
 
