@@ -565,36 +565,58 @@ def create_stripe_checkout_session(order_in: schemas.OrderCreate):
 
         line_items = []
         for item in order_in.items:
+            unit_amount = int(round(item.price * 100))
+            if unit_amount <= 0:
+                continue
             line_items.append({
                 "price_data": {
                     "currency": "thb",
                     "product_data": {
                         "name": item.product_name,
                     },
-                    "unit_amount": int(round(item.price * 100)), # Amount in smallest currency unit (satang/cents)
+                    "unit_amount": unit_amount, # Amount in smallest currency unit (satang)
                 },
-                "quantity": item.quantity,
+                "quantity": max(1, item.quantity),
             })
 
-        domain_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        if not line_items:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid items in the checkout order."
+            )
 
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
-            line_items=line_items,
-            mode="payment",
-            customer_email=order_in.customer_email,
-            success_url=f"{domain_url}/checkout?status=success&session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{domain_url}/checkout?status=cancel",
-            metadata={
-                "customer_name": order_in.customer_name,
-                "customer_email": order_in.customer_email,
-                "shipping_address": order_in.shipping_address,
+        domain_url = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+        session_params = {
+            "line_items": line_items,
+            "mode": "payment",
+            "success_url": f"{domain_url}/checkout?status=success&session_id={{CHECKOUT_SESSION_ID}}",
+            "cancel_url": f"{domain_url}/checkout?status=cancel",
+            "metadata": {
+                "user_id": str(order_in.user_id or ""),
+                "customer_name": (order_in.customer_name or "")[:100],
+                "customer_email": (order_in.customer_email or "")[:100],
+                "shipping_address": (order_in.shipping_address or "")[:450],
             }
-        )
+        }
+        
+        if order_in.customer_email and "@" in order_in.customer_email:
+            session_params["customer_email"] = order_in.customer_email
+        if order_in.user_id:
+            session_params["client_reference_id"] = str(order_in.user_id)
+
+        try:
+            session = stripe.checkout.Session.create(**session_params)
+        except Exception:
+            session_params["payment_method_types"] = ["card"]
+            session = stripe.checkout.Session.create(**session_params)
 
         return {"checkout_url": session.url, "session_id": session.id}
 
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"[STRIPE ERROR] Failed to create checkout session: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to create Stripe Checkout session: {str(e)}"

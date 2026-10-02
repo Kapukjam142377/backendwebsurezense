@@ -209,10 +209,12 @@ class Product(ProductBase):
 
 # Order Item Schemas
 class OrderItemBase(BaseModel):
-    product_id: Optional[int] = None
-    product_name: str
+    product_id: Optional[int] = Field(None, alias="productId")
+    product_name: str = Field(..., alias="productName")
     price: float
     quantity: int
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 class OrderItemCreate(OrderItemBase):
     pass
@@ -221,7 +223,7 @@ class OrderItem(OrderItemBase):
     id: int
     order_id: int
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 
 # Payment Transaction Schemas
@@ -247,17 +249,21 @@ class PaymentTransaction(PaymentTransactionBase):
 
 # Order Schemas
 class OrderBase(BaseModel):
-    user_id: Optional[int] = None
-    customer_name: str
-    customer_email: str
-    customer_phone: Optional[str] = None
-    shipping_address: str
-    payment_method: str
-    payment_status: Optional[str] = "pending"
+    user_id: Optional[int] = Field(None, alias="userId")
+    customer_name: str = Field(..., alias="customerName")
+    customer_email: str = Field(..., alias="customerEmail")
+    customer_phone: Optional[str] = Field(None, alias="customerPhone")
+    shipping_address: str = Field(..., alias="shippingAddress")
+    payment_method: Optional[str] = Field("Credit Card", alias="paymentMethod")
+    payment_status: Optional[str] = Field("pending", alias="paymentStatus")
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 class OrderCreate(OrderBase):
     items: List[OrderItemCreate]
-    stripe_session_id: Optional[str] = None
+    stripe_session_id: Optional[str] = Field(None, alias="stripeSessionId")
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 class OrderStatusUpdate(BaseModel):
     payment_status: Optional[str] = None
