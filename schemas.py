@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import date, datetime
 
@@ -189,12 +189,22 @@ class ProductBase(BaseModel):
 class ProductCreate(ProductBase):
     pass
 
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    sku: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    image_url: Optional[str] = None
+    stock_quantity: Optional[int] = None
+    category: Optional[str] = None
+
 class Product(ProductBase):
     id: int
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
 
 
 # Order Item Schemas
@@ -363,4 +373,44 @@ class Notification(NotificationBase):
 class UnreadCountResponse(BaseModel):
     user_id: int
     unread_count: int
+
+
+# Contact Inquiry Schemas
+class ContactInquiryBase(BaseModel):
+    user_id: Optional[int] = None
+    custom_id: Optional[str] = None
+    inquiry_type: str = Field(..., alias="inquiryType")
+    first_name: str = Field(..., alias="firstName")
+    last_name: str = Field(..., alias="lastName")
+    email: str
+    phone: Optional[str] = None
+    job_position: Optional[str] = Field(None, alias="jobPosition")
+    company: Optional[str] = None
+    title: str
+    message: str
+    status: Optional[str] = "new"
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+
+class ContactInquiryCreate(ContactInquiryBase):
+    id: Optional[str] = None  # Accepts frontend custom ID like inq-1234
+
+
+class ContactInquiryUpdate(BaseModel):
+    status: Optional[str] = None
+    inquiry_type: Optional[str] = Field(None, alias="inquiryType")
+    title: Optional[str] = None
+    message: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+
+class ContactInquiry(ContactInquiryBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
 

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Header
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -7,6 +7,8 @@ from pydantic import BaseModel
 import hashlib
 import secrets
 import os
+import json
+
 import stripe
 import jwt
 import smtplib
@@ -78,8 +80,12 @@ EMAIL_ENABLED = bool(SMTP_USER and SMTP_PASS)
 def _send_email_background(to_email: str, subject: str, html_body: str):
     """Send an HTML email in a background thread. Logs errors without crashing."""
     if not EMAIL_ENABLED:
-        print(f"[EMAIL DISABLED] Would send '{subject}' to {to_email}")
+        try:
+            print(f"[EMAIL DISABLED] Would send '{subject}' to {to_email}")
+        except Exception:
+            pass
         return
+
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -144,7 +150,7 @@ def email_reset_password_html(name: str, reset_link: str) -> str:
 # Create all database tables on startup (if they do not exist yet)
 models.Base.metadata.create_all(bind=engine)
 
-# Auto-migrate table columns for existing databases
+# Auto-migrate table columns and fix auto-increment sequences for existing databases
 try:
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE;"))
@@ -153,8 +159,23 @@ try:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token VARCHAR(255);"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS reset_token_expires TIMESTAMP;"))
         conn.commit()
+
+        # Fix sequence values for tables where rows may have been inserted with explicit IDs
+        tables_to_sync = [
+            "products", "orders", "order_items", "users", "patients",
+            "medical_reports", "tumor_markers", "genetic_mutations",
+            "xzense_analyses", "lab_registrations", "competition_profiles",
+            "announcements", "notifications", "contact_inquiries", "payment_transactions"
+        ]
+        for tbl in tables_to_sync:
+            try:
+                conn.execute(text(f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), COALESCE(max(id), 0) + 1, false) FROM {tbl};"))
+                conn.commit()
+            except Exception:
+                pass
 except Exception as migrate_err:
     print(f"[DB MIGRATION NOTICE] Auto-column migration note: {migrate_err}")
+
 
 app = FastAPI(
     title="Surazense Cancer Report API",
@@ -384,15 +405,44 @@ def create_order(order_in: schemas.OrderCreate, db: Session = Depends(get_db)):
             detail=f"Failed to place order ({type(e).__name__}): {str(e)}"
         )
 
-# 2. List All Orders
+# 2. List All Orders (with optional user_id, payment_status, order_status filters)
 @app.get("/api/orders", response_model=List[schemas.Order], tags=["eCommerce Orders"])
-def list_orders(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    orders = db.query(models.Order).offset(skip).limit(limit).all()
+def list_orders(
+    user_id: Optional[int] = None,
+    payment_status: Optional[str] = None,
+    order_status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.Order)
+    if user_id is not None:
+        query = query.filter(models.Order.user_id == user_id)
+    if payment_status is not None:
+        query = query.filter(models.Order.payment_status == payment_status)
+    if order_status is not None:
+        query = query.filter(models.Order.order_status == order_status)
+    orders = query.order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
     return orders
+
+# 2.1 Get Order by Stripe Session ID
+@app.get("/api/orders/by-session/{session_id}", response_model=schemas.Order, tags=["eCommerce Orders"])
+def get_order_by_session(session_id: str, db: Session = Depends(get_db)):
+    tx = db.query(models.PaymentTransaction).filter(models.PaymentTransaction.transaction_ref == session_id).first()
+    if tx:
+        db_order = db.query(models.Order).filter(models.Order.id == tx.order_id).first()
+        if db_order:
+            return db_order
+            
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Order with session ID '{session_id}' not found"
+    )
 
 # 3. Get Specific Order
 @app.get("/api/orders/{order_id}", response_model=schemas.Order, tags=["eCommerce Orders"])
 def get_order(order_id: int, db: Session = Depends(get_db)):
+
     db_order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not db_order:
         raise HTTPException(
@@ -551,9 +601,92 @@ def create_stripe_checkout_session(order_in: schemas.OrderCreate):
         )
 
 
+# 7. Stripe Webhook Handler
+@app.post("/api/webhook/stripe", tags=["Stripe Checkout"])
+@app.post("/webhook/stripe", tags=["Stripe Checkout"])
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle Stripe Webhook Events (checkout.session.completed, etc.)"""
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    if webhook_secret and sig_header:
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, webhook_secret
+            )
+        except stripe.error.SignatureVerificationError:
+            raise HTTPException(status_code=400, detail="Invalid Stripe signature")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
+    else:
+        try:
+            event = json.loads(payload.decode("utf-8"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    event_type = event.get("type")
+
+    if event_type == "checkout.session.completed":
+        session_obj = event["data"]["object"]
+        session_id = session_obj.get("id")
+
+        # Check if transaction already recorded
+        existing_tx = db.query(models.PaymentTransaction).filter(models.PaymentTransaction.transaction_ref == session_id).first()
+        if existing_tx:
+            # Mark existing order as paid
+            db_order = db.query(models.Order).filter(models.Order.id == existing_tx.order_id).first()
+            if db_order:
+                db_order.payment_status = "paid"
+                existing_tx.status = "success"
+                db.commit()
+                return {"status": "already_exists", "order_id": db_order.id}
+
+        # Otherwise create order from session metadata
+        metadata = session_obj.get("metadata", {})
+        customer_email = metadata.get("customer_email") or session_obj.get("customer_email") or ""
+        customer_name = metadata.get("customer_name") or "Customer"
+        shipping_address = metadata.get("shipping_address") or "Online Order"
+        total_amount = float(session_obj.get("amount_total", 0)) / 100.0
+
+        user_match = db.query(models.User).filter(models.User.email == customer_email).first()
+        user_id = user_match.id if user_match else None
+
+        db_order = models.Order(
+            user_id=user_id,
+            customer_name=customer_name,
+            customer_email=customer_email,
+            shipping_address=shipping_address,
+            payment_method="Credit Card",
+            payment_status="paid",
+            order_status="received",
+            total_amount=total_amount
+        )
+        db.add(db_order)
+        db.flush()
+
+        # Add transaction
+        db_tx = models.PaymentTransaction(
+            order_id=db_order.id,
+            gateway="Stripe",
+            transaction_ref=session_id,
+            amount=total_amount,
+            currency="THB",
+            status="success",
+            payment_method="card"
+        )
+        db.add(db_tx)
+        db.commit()
+
+        return {"status": "success", "order_id": db_order.id}
+
+    return {"status": "ignored", "event_type": event_type}
+
+
 # ===================================================
 #   Password Hashing Helpers
 # ===================================================
+
 
 def hash_password(password: str) -> str:
     # Generate a random 16-byte salt
@@ -1393,6 +1526,265 @@ def delete_notification(notification_id: int, db: Session = Depends(get_db)):
     db.delete(db_notif)
     db.commit()
     return None
+
+
+# ===================================================
+#   Contact Inquiries & Quotations API Endpoints
+# ===================================================
+
+@app.post("/api/contacts", response_model=schemas.ContactInquiry, status_code=status.HTTP_201_CREATED, tags=["Contact & Inquiries"])
+def create_contact_inquiry(inquiry_in: schemas.ContactInquiryCreate, db: Session = Depends(get_db)):
+    try:
+        db_inquiry = models.ContactInquiry(
+            custom_id=inquiry_in.id or inquiry_in.custom_id,
+            user_id=inquiry_in.user_id,
+            inquiry_type=inquiry_in.inquiry_type,
+
+            first_name=inquiry_in.first_name,
+            last_name=inquiry_in.last_name,
+            email=inquiry_in.email,
+            phone=inquiry_in.phone,
+            job_position=inquiry_in.job_position,
+            company=inquiry_in.company,
+            title=inquiry_in.title,
+            message=inquiry_in.message,
+            status=inquiry_in.status or "new"
+        )
+        db.add(db_inquiry)
+        db.commit()
+        db.refresh(db_inquiry)
+
+        # Create In-App Notification for Admin
+        try:
+            admin_notif = models.Notification(
+                user_id=None,  # Broadcast to all admins
+                title=f"ข้อความติดต่อใหม่: {db_inquiry.title}",
+                message=f"จาก {db_inquiry.first_name} {db_inquiry.last_name} ({db_inquiry.email}) [{db_inquiry.inquiry_type}]",
+                type="contact",
+                reference_id=db_inquiry.id,
+                is_read=False
+            )
+            db.add(admin_notif)
+            db.commit()
+        except Exception as notif_err:
+            print(f"[NOTIFICATION NOTICE] Failed to create contact inquiry notification: {notif_err}")
+
+        # Send email notification to admin / receipt to user if enabled
+        try:
+            admin_email = os.getenv("ADMIN_EMAIL", "info@surazense.com")
+            subject = f"[Surazense] ข้อความติดต่อใหม่: {db_inquiry.title} ({db_inquiry.inquiry_type})"
+            html = f"""
+            <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #e2e8f0;border-radius:12px">
+                <h2 style="color:#0f172a;margin-top:0">มีข้อความติดต่อใหม่ผ่านหน้าเว็บไซต์</h2>
+                <p><strong>ประเภท:</strong> {db_inquiry.inquiry_type}</p>
+                <p><strong>ชื่อผู้ติดต่อ:</strong> {db_inquiry.first_name} {db_inquiry.last_name}</p>
+                <p><strong>อีเมล:</strong> {db_inquiry.email} | <strong>โทรศัพท์:</strong> {db_inquiry.phone or '-'}</p>
+                <p><strong>องค์กร/บริษัท:</strong> {db_inquiry.company or '-'} ({db_inquiry.job_position or '-'})</p>
+                <p><strong>หัวข้อ:</strong> {db_inquiry.title}</p>
+                <div style="background:#f8fafc;padding:16px;border-radius:8px;border-left:4px solid #3b82f6;margin:16px 0">
+                    <p style="margin:0;white-space:pre-wrap">{db_inquiry.message}</p>
+                </div>
+            </div>
+            """
+            send_email(to_email=admin_email, subject=subject, html_body=html)
+        except Exception:
+            pass
+
+        return db_inquiry
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to submit contact inquiry: {str(e)}"
+        )
+
+
+@app.get("/api/contacts", response_model=List[schemas.ContactInquiry], tags=["Contact & Inquiries"])
+def list_contact_inquiries(
+    status: Optional[str] = None,
+    inquiry_type: Optional[str] = None,
+    user_id: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """List all contact messages / inquiries (Admin view with filters)"""
+    query = db.query(models.ContactInquiry)
+    if status and status != "all":
+        query = query.filter(models.ContactInquiry.status == status)
+    if inquiry_type and inquiry_type != "all":
+        query = query.filter(models.ContactInquiry.inquiry_type == inquiry_type)
+    if user_id:
+        query = query.filter(models.ContactInquiry.user_id == user_id)
+
+    return query.order_by(models.ContactInquiry.created_at.desc()).offset(skip).limit(limit).all()
+
+
+@app.get("/api/contacts/{inquiry_id}", response_model=schemas.ContactInquiry, tags=["Contact & Inquiries"])
+def get_contact_inquiry(inquiry_id: int, db: Session = Depends(get_db)):
+    db_inquiry = db.query(models.ContactInquiry).filter(models.ContactInquiry.id == inquiry_id).first()
+    if not db_inquiry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact inquiry with ID {inquiry_id} not found"
+        )
+    return db_inquiry
+
+
+class InquiryStatusUpdate(BaseModel):
+    status: str
+
+
+@app.patch("/api/contacts/{inquiry_id}/status", response_model=schemas.ContactInquiry, tags=["Contact & Inquiries"])
+def update_contact_inquiry_status(inquiry_id: int, status_update: InquiryStatusUpdate, db: Session = Depends(get_db)):
+    db_inquiry = db.query(models.ContactInquiry).filter(models.ContactInquiry.id == inquiry_id).first()
+    if not db_inquiry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact inquiry with ID {inquiry_id} not found"
+        )
+    db_inquiry.status = status_update.status
+    db.commit()
+    db.refresh(db_inquiry)
+    return db_inquiry
+
+
+@app.patch("/api/contacts/{inquiry_id}", response_model=schemas.ContactInquiry, tags=["Contact & Inquiries"])
+def update_contact_inquiry(inquiry_id: int, update_in: schemas.ContactInquiryUpdate, db: Session = Depends(get_db)):
+    db_inquiry = db.query(models.ContactInquiry).filter(models.ContactInquiry.id == inquiry_id).first()
+    if not db_inquiry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact inquiry with ID {inquiry_id} not found"
+        )
+
+    update_data = update_in.model_dump(exclude_unset=True)
+    for field, val in update_data.items():
+        setattr(db_inquiry, field, val)
+
+    db.commit()
+    db.refresh(db_inquiry)
+    return db_inquiry
+
+
+@app.delete("/api/contacts/{inquiry_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Contact & Inquiries"])
+def delete_contact_inquiry(inquiry_id: int, db: Session = Depends(get_db)):
+    db_inquiry = db.query(models.ContactInquiry).filter(models.ContactInquiry.id == inquiry_id).first()
+    if not db_inquiry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact inquiry with ID {inquiry_id} not found"
+        )
+    db.delete(db_inquiry)
+    db.commit()
+    return None
+
+
+# ===================================================
+#   Products Catalog API Endpoints
+# ===================================================
+
+@app.post("/api/products", response_model=schemas.Product, status_code=status.HTTP_201_CREATED, tags=["Products"])
+def create_product(product_in: schemas.ProductCreate, db: Session = Depends(get_db)):
+    existing = db.query(models.Product).filter(models.Product.sku == product_in.sku).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Product with SKU '{product_in.sku}' already exists"
+        )
+    try:
+        db_product = models.Product(
+            name=product_in.name,
+            sku=product_in.sku,
+            description=product_in.description,
+            price=product_in.price,
+            image_url=product_in.image_url,
+            stock_quantity=product_in.stock_quantity,
+            category=product_in.category
+        )
+        db.add(db_product)
+        db.commit()
+        db.refresh(db_product)
+        return db_product
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create product: {str(e)}"
+        )
+
+
+@app.get("/api/products", response_model=List[schemas.Product], tags=["Products"])
+def list_products(
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """List products with optional category and keyword search"""
+    query = db.query(models.Product)
+    if category and category != "all":
+        query = query.filter(models.Product.category == category)
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (models.Product.name.ilike(search_pattern)) |
+            (models.Product.sku.ilike(search_pattern)) |
+            (models.Product.description.ilike(search_pattern))
+        )
+    return query.order_by(models.Product.id.asc()).offset(skip).limit(limit).all()
+
+
+@app.get("/api/products/{product_id}", response_model=schemas.Product, tags=["Products"])
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not db_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found"
+        )
+    return db_product
+
+
+@app.patch("/api/products/{product_id}", response_model=schemas.Product, tags=["Products"])
+def update_product(product_id: int, product_update: schemas.ProductUpdate, db: Session = Depends(get_db)):
+    db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not db_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found"
+        )
+    
+    update_data = product_update.model_dump(exclude_unset=True)
+    for field, val in update_data.items():
+        setattr(db_product, field, val)
+        
+    try:
+        db.commit()
+        db.refresh(db_product)
+        return db_product
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update product: {str(e)}"
+        )
+
+
+@app.delete("/api/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Products"])
+def delete_product(product_id: int, db: Session = Depends(get_db)):
+    db_product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not db_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {product_id} not found"
+        )
+    db.delete(db_product)
+    db.commit()
+    return None
+
+
 
 
 
