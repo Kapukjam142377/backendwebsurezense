@@ -29,7 +29,18 @@ if DATABASE_URL.startswith("sqlite"):
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 else:
-    engine = create_engine(DATABASE_URL)
+    try:
+        engine = create_engine(DATABASE_URL)
+    except Exception as e:
+        if ("psycopg" in str(e).lower() or "no module named" in str(e).lower()) and DATABASE_URL.startswith("postgresql://"):
+            try:
+                # Try explicit psycopg2 driver
+                alt_url = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+                engine = create_engine(alt_url)
+            except Exception:
+                raise e
+        else:
+            raise e
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
